@@ -140,6 +140,7 @@ def main(argv):
             d.use = d.type == a.device
             print("device", d.name, d.type, d.use)
         sc.cycles.device = "GPU"
+        sc.cycles.denoising_use_gpu = True
     os.makedirs(a.out, exist_ok=True)
     if a.still is not None:
         f = int(round(a.still * (n - 1)))

@@ -9,6 +9,7 @@ with the same camera curves render.py keys, so they track the scene.
 """
 import argparse
 import math
+import multiprocessing
 import os
 import re
 import subprocess
@@ -138,7 +139,7 @@ def draw_overlays(L, shot, t, cam):
             continue
         k = ov["kind"]
         if k == "caption":
-            L.text((96, H - 200), ov["text"], 34, a * 0.9)
+            L.text((96, 96), ov["text"], 36, a * 0.9)
         elif k == "title":
             L.text((W / 2, H / 2 - 40), ov["text"], 168, a, bold=True, anchor="mm")
             L.line([(W / 2 - 160, H / 2 + 80), (W / 2 + 160, H / 2 + 80)], a * 0.7, 2)
@@ -211,7 +212,9 @@ def subtitle_times(sid, text):
         bounds.append(min(cands, key=lambda i: abs(i - gi)) / 100 if cands else guess)
     bounds.append(total)
     for c, a, b in zip(chunks, bounds[:-1], bounds[1:]):
-        out.append((a, b, c.rstrip("，、；：")))
+        # broadcast style: no punctuation, a full-width space for pauses
+        c = re.sub(r"[，、；：。！？]+", "　", c).strip("　")
+        out.append((a, b, c))
     return out
 
 
@@ -304,6 +307,13 @@ def endcard(t, dur):
     return L.composite(im)
 
 
+_FRAME = None
+
+
+def _frame_bytes(g):
+    return _FRAME(g).tobytes()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--frames", default=os.path.join(ROOT, "build", "frames"))
@@ -312,6 +322,7 @@ def main():
     ap.add_argument("--shots", default="")
     ap.add_argument("--preview", type=float, default=None, help="write one PNG per shot at t")
     ap.add_argument("--crf", type=int, default=16)
+    ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     a = ap.parse_args()
     ids = a.shots.split(",") if a.shots else [s["id"] for s in storyboard.SHOTS]
     tl, total = timeline(ids)
@@ -329,15 +340,19 @@ def main():
             chapters.append((e["start"] / FPS + 0.3, ch))
         prev = ch
 
+    # one subtitle at a time: lead the voice slightly, never overlap the next
+    subs.sort()
+    subs = [(max(s0 - 0.1, subs[i - 1][1] if i else 0), min(s1 + 0.25, subs[i + 1][0] - 0.1)
+             if i + 1 < len(subs) else s1 + 0.25, s) for i, (s0, s1, s) in enumerate(subs)]
+
     yy, xx = np.mgrid[0:H, 0:W]
     r = np.hypot((xx - W / 2) / (W / 2), (yy - H / 2) / (H / 2))
     vig = 1 - 0.28 * np.clip(r - 0.45, 0, 1) ** 1.6
     # a soft dark band behind the subtitles
     vig *= 1 - 0.38 * np.clip((yy - H * 0.78) / (H * 0.22), 0, 1) ** 1.3
     vig = vig.astype(np.float32)
-    rng = np.random.default_rng(7)
-
     def frame_at(g):
+        rng = np.random.default_rng(g)
         live = [e for e in tl if e["start"] <= g < e["start"] + e["n"]]
         out = None
         for e in live:
@@ -358,8 +373,8 @@ def main():
         sec = g / FPS
         L = Layer()
         for s0, s1, s in subs:
-            if s0 - 0.1 <= sec <= s1 + 0.15:
-                draw_subtitle(L, s, min(1.0, (sec - s0 + 0.1) / 0.15, (s1 + 0.15 - sec) / 0.15))
+            if s0 <= sec <= s1:
+                draw_subtitle(L, s, min(1.0, (sec - s0) / 0.12, (s1 - sec) / 0.12))
         for c0, ch in chapters:
             k = fade(sec, c0, c0 + 3.4, 0.6 / 3.4) if c0 <= sec <= c0 + 3.4 else 0
             if k:
@@ -381,10 +396,13 @@ def main():
                            "-c:v", "libx264", "-preset", "slow", "-crf", str(a.crf), "-pix_fmt", "yuv420p",
                            "-tune", "film", "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart",
                            "-shortest", a.out], stdin=subprocess.PIPE)
-    for g in range(nframes):
-        ff.stdin.write(frame_at(g).tobytes())
-        if g % 240 == 0:
-            print(f"{g}/{nframes}", flush=True)
+    global _FRAME
+    _FRAME = frame_at
+    with multiprocessing.get_context("fork").Pool(a.jobs) as pool:
+        for g, buf in enumerate(pool.imap(_frame_bytes, range(nframes), chunksize=4)):
+            ff.stdin.write(buf)
+            if g % 240 == 0:
+                print(f"{g}/{nframes}", flush=True)
     ff.stdin.close()
     ff.wait()
     print("wrote", a.out, f"{nframes / FPS:.1f}s")
