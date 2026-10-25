@@ -190,7 +190,7 @@ def mat_facade(name, scene, palette, glass=(0.05, 0.065, 0.075), style="apt"):
     # night lights
     night = driven_value(t, scene, "night")
     lit = t.mul(t.mul(win, t.inv(roof)), t.gt(cell, 0.68))
-    warm = t.mixc(t.gt(cell, 0.8), t.rgb((1.0, 0.72, 0.42)), t.rgb((0.75, 0.88, 1.0)))
+    warm = t.mixc(t.gt(cell, 0.84), t.rgb((1.0, 0.58, 0.26)), t.rgb((0.8, 0.9, 1.0)))
     emis_col = t.mixc(sign_band, warm, sign_col)
     bright = t.maprange(t.math("FRACT", t.mul(cell, 13.7)), 0, 1, 0.25, 1.0)
     emis_str = t.mul(night, t.add(t.mul(t.mul(lit, bright), 0.55), t.mul(t.mul(sign_band, t.inv(roof)), 1.6)))
@@ -304,10 +304,34 @@ def mat_ground(scene, imgs):
     em_col = t.mixc(t.gt(ghost_v, 0.01), t.rgb((0.35, 0.75, 1.0)), t.rgb((0.45, 1.0, 0.55)))
     # street lights at night
     night = driven_value(t, scene, "night")
-    em_str = t.add(em_str, t.mul(t.mul(road_on, night), 0.35))
+    em_str = t.add(em_str, t.mul(t.mul(road_on, night), 0.9))
     em_col = t.mixc(t.mul(t.mul(road_on, night), t.inv(t.gt(em_str, 1.0))), em_col, t.rgb((1.0, 0.62, 0.3)))
     bsdf = t.node("ShaderNodeBsdfPrincipled", inputs={"Base Color": gcol, "Roughness": 0.92,
                                                       "Emission Color": em_col, "Emission Strength": em_str})
+    finish(m, t, bsdf, scene)
+    return m
+
+
+def mat_outskirts(scene):
+    m = bpy.data.materials.new("outskirts")
+    t = NT(m.node_tree)
+    m.node_tree.nodes.clear()
+    tc = t.node("ShaderNodeTexCoord")
+    n = t.node("ShaderNodeTexNoise", inputs={"Scale": 0.004, "Detail": 6.0, "Roughness": 0.65})
+    t.set(n.inputs["Vector"], tc.outputs["Object"])
+    city = t.ramp(n.outputs["Fac"], [(0.35, (0.16, 0.16, 0.15, 1)), (0.5, (0.30, 0.29, 0.27, 1)),
+                                      (0.62, (0.20, 0.24, 0.15, 1))])
+    farm = t.ramp(n.outputs["Fac"], [(0.35, (0.10, 0.14, 0.05, 1)), (0.5, (0.17, 0.20, 0.08, 1)),
+                                      (0.62, (0.13, 0.17, 0.07, 1))])
+    # farmland around Taipei until the post-war boom, city afterwards
+    urban = t.maprange(driven_value(t, scene, "year"), 1945.0, 1985.0, 0.0, 1.0)
+    col = t.mixc(urban, farm, city)
+    bsdf = t.node("ShaderNodeBsdfPrincipled", inputs={"Base Color": col, "Roughness": 0.9})
+    v = t.node("ShaderNodeTexVoronoi", inputs={"Scale": 0.03, "Randomness": 1.0})
+    t.set(v.inputs["Vector"], tc.outputs["Object"])
+    sp = t.maprange(v.outputs["Distance"], 0.0, 0.18, 1.0, 0.0)
+    t.set(bsdf.inputs["Emission Color"], t.rgb((1.0, 0.72, 0.42)))
+    t.set(bsdf.inputs["Emission Strength"], t.mul(t.mul(t.mul(sp, urban), driven_value(t, scene, "night")), 3.0))
     finish(m, t, bsdf, scene)
     return m
 
@@ -678,6 +702,14 @@ def main():
     wp.location.z = -2.2
     wp.data.materials.append(mat_water(sc))
 
+    # Beyond the modelled square: a 60 km plain of mottled city, mostly
+    # swallowed by haze, so wide shots never show the end of the world.
+    bpy.ops.mesh.primitive_plane_add(size=60000)
+    outer = bpy.context.active_object
+    outer.name = "Outskirts"
+    outer.location.z = -3.0
+    outer.data.materials.append(mat_outskirts(sc))
+
     print("assets")
     lib = bpy.data.collections.new("Assets")
     sc.collection.children.link(lib)
@@ -739,8 +771,18 @@ def main():
     sky.altitude = 200
     sky.aerosol_density = 3.0
     bg = t.node("ShaderNodeBackground", inputs={"Color": sky.outputs[0], "Strength": 0.25})
+    # Seen by the camera, the sky fades into the haze colour toward the
+    # horizon so the far edge of the model dissolves instead of cutting off.
+    tc = t.node("ShaderNodeTexCoord")
+    dz = t.node("ShaderNodeSeparateXYZ")
+    t.set(dz.inputs[0], tc.outputs["Generated"])
+    hz = t.inv(t.maprange(dz.outputs["Z"], -0.02, 0.32, 0.0, 1.0))
+    hz = t.mul(t.mul(hz, hz), t.node("ShaderNodeLightPath").outputs["Is Camera Ray"])
+    fogc = t.comb(driven_value(t, sc, "fog_r"), driven_value(t, sc, "fog_g"), driven_value(t, sc, "fog_b"))
+    haze = t.node("ShaderNodeBackground", inputs={"Color": fogc, "Strength": 1.0})
+    mixw = t.node("ShaderNodeMixShader", inputs={0: hz, 1: bg, 2: haze})
     out = t.node("ShaderNodeOutputWorld")
-    t.set(out.inputs[0], bg)
+    t.set(out.inputs[0], mixw)
     sun = bpy.data.objects.new("Sun", bpy.data.lights.new("Sun", "SUN"))
     sc.collection.objects.link(sun)
     sun.data.energy = 4.0
