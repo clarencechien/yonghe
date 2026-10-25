@@ -46,3 +46,14 @@ python pipeline/compose.py                           # → build/yonghe.mp4
 ```
 
 渲染規格：1080p、每像素 64 次取樣加降噪，10 張 L4 平行渲染；白天鏡頭每格約 2–3 秒，夜景每格約 5 秒，全片約 7,300 格。窗戶與路燈只作為可見的發光面、不當成光源取樣，夜景渲染時間因此減半，畫面上看不出差別。
+
+交付版另外做響度標準化（-16 LUFS）與壓縮：
+
+```bash
+ffmpeg -i build/yonghe.mp4 -c:v libx264 -preset slow -crf 22 -tune grain -af loudnorm=I=-16:TP=-1.5:LRA=11 \
+       -c:a aac -b:a 256k -movflags +faststart build/yonghe_final_1080p.mp4
+```
+
+## 製作狀態（2026-10-25）
+
+已完成：考據、場景、18 段旁白（Gemini TTS，逐段轉錄核對）、五段配樂（Lyria 3）、全片 1080p 渲染與合成，成片長 5 分 09 秒。
