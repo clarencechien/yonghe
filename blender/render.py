@@ -20,52 +20,10 @@ from mathutils import Vector
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import storyboard  # noqa: E402
+from curves import cr, ease, lin  # noqa: E402
 
 BUILD = os.path.join(HERE, "..", "build")
 FPS = 24
-
-
-def ease(t, k=0.65):
-    s = t * t * (3 - 2 * t)
-    return t + (s - t) * k
-
-
-def cr(keys, t):
-    """Catmull-Rom through (time, value) keys; values may be tuples."""
-    if not isinstance(keys, (list, tuple)) or not keys or not isinstance(keys[0], (list, tuple)):
-        return keys
-    if len(keys) == 1 or t <= keys[0][0]:
-        return keys[0][1]
-    if t >= keys[-1][0]:
-        return keys[-1][1]
-    i = max(j for j in range(len(keys) - 1) if keys[j][0] <= t)
-    t0, t1 = keys[i][0], keys[i + 1][0]
-    u = (t - t0) / (t1 - t0)
-    p1, p2 = keys[i][1], keys[i + 1][1]
-    p0 = keys[i - 1][1] if i > 0 else p1
-    p3 = keys[i + 2][1] if i + 2 < len(keys) else p2
-    scalar = not isinstance(p1, (list, tuple))
-    if scalar:
-        p0, p1, p2, p3 = (p0,), (p1,), (p2,), (p3,)
-    out = []
-    for a, b, c, d in zip(p0, p1, p2, p3):
-        out.append(0.5 * ((2 * b) + (-a + c) * u + (2 * a - 5 * b + 4 * c - d) * u * u
-                          + (-a + 3 * b - 3 * c + d) * u ** 3))
-    return out[0] if scalar else tuple(out)
-
-
-def lin(keys, t):
-    """Piecewise linear with smoothstep inside each segment (for controls)."""
-    if not isinstance(keys, (list, tuple)) or not keys or not isinstance(keys[0], (list, tuple)):
-        return keys
-    if t <= keys[0][0]:
-        return keys[0][1]
-    for (t0, v0), (t1, v1) in zip(keys[:-1], keys[1:]):
-        if t <= t1:
-            u = (t - t0) / max(t1 - t0, 1e-9)
-            u = u * u * (3 - 2 * u)
-            return v0 + (v1 - v0) * u
-    return keys[-1][1]
 
 
 CONTROLS = ("year", "bp", "reveal", "ghost", "night", "fog")
@@ -154,6 +112,7 @@ def main(argv):
     ap.add_argument("--blend", default=os.path.join(BUILD, "yonghe.blend"))
     ap.add_argument("--duration", type=float, default=None, help="override shot length (s)")
     ap.add_argument("--tag", default="")
+    ap.add_argument("--device", default="CPU", help="CPU, CUDA or OPTIX")
     ap.add_argument("--look", default=None, help="JSON overrides for shot['look']")
     ap.add_argument("--set", default=None, help="JSON overrides for shot keys")
     a = ap.parse_args(argv)
@@ -173,6 +132,15 @@ def main(argv):
     w, h = map(int, a.res.split("x"))
     sc.render.resolution_x, sc.render.resolution_y = w, h
     sc.cycles.samples = a.samples
+    if a.device != "CPU":
+        prefs = bpy.context.preferences.addons["cycles"].preferences
+        prefs.compute_device_type = a.device
+        prefs.get_devices()
+        for d in prefs.devices:
+            d.use = d.type == a.device
+            print("device", d.name, d.type, d.use)
+        sc.cycles.device = "GPU"
+        sc.cycles.denoising_use_gpu = True
     os.makedirs(a.out, exist_ok=True)
     if a.still is not None:
         f = int(round(a.still * (n - 1)))
